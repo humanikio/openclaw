@@ -6,6 +6,8 @@ export type SourceOrigin = "package" | "top-level";
 export type Skill = CanonicalSkill & {
   // Preserve legacy source reads while keeping the canonical upstream shape.
   source?: string;
+  /** Execution pattern: "http" (curl + env vars) or "registered" (callable tools). */
+  toolPattern?: string;
 };
 
 export function createSyntheticSourceInfo(
@@ -53,9 +55,11 @@ export function formatSkillsForPrompt(skills: Skill[]): string {
     "<available_skills>",
   ];
   for (const skill of skills) {
+    const toolPattern = skill.toolPattern || "registered";
     lines.push("  <skill>");
     lines.push(`    <name>${escapeXml(skill.name)}</name>`);
     lines.push(`    <description>${escapeXml(skill.description)}</description>`);
+    lines.push(`    <tool_pattern>${escapeXml(toolPattern)}</tool_pattern>`);
     lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
     lines.push("  </skill>");
   }

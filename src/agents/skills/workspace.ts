@@ -573,6 +573,13 @@ function loadSkillEntries(
         filePath: skill.filePath,
         maxBytes: limits.maxSkillFileBytes,
       }) ?? ({} as ParsedSkillFrontmatter);
+    // Populate toolPattern from frontmatter so formatters can include it in XML.
+    // Integration/custom skills set "tool_pattern: http" (use curl + env vars).
+    // HOS/bundled skills omit it and default to "registered" (callable tools).
+    const rawToolPattern = frontmatter["tool_pattern"] ?? frontmatter["tool-pattern"];
+    if (rawToolPattern && typeof rawToolPattern === "string") {
+      skill.toolPattern = rawToolPattern.trim();
+    }
     const invocation = resolveSkillInvocationPolicy(frontmatter);
     return {
       skill,
@@ -616,8 +623,10 @@ export function formatSkillsCompact(skills: Skill[]): string {
     "<available_skills>",
   ];
   for (const skill of skills) {
+    const toolPattern = skill.toolPattern || "registered";
     lines.push("  <skill>");
     lines.push(`    <name>${escapeXml(skill.name)}</name>`);
+    lines.push(`    <tool_pattern>${escapeXml(toolPattern)}</tool_pattern>`);
     lines.push(`    <location>${escapeXml(skill.filePath)}</location>`);
     lines.push("  </skill>");
   }
