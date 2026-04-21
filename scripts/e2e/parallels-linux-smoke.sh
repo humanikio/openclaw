@@ -32,7 +32,7 @@ BUILD_LOCK_DIR="${TMPDIR:-/tmp}/openclaw-parallels-build.lock"
 
 TIMEOUT_SNAPSHOT_S=180
 TIMEOUT_BOOTSTRAP_S=600
-TIMEOUT_INSTALL_S=1200
+TIMEOUT_INSTALL_S=420
 TIMEOUT_VERIFY_S=90
 TIMEOUT_ONBOARD_S=180
 TIMEOUT_AGENT_S=180
@@ -511,6 +511,11 @@ ensure_current_build() {
   [[ "$build_commit" == "$head" ]] || die "dist/build-info.json still does not match HEAD after build"
 }
 
+write_package_dist_inventory() {
+  node --import tsx --input-type=module --eval \
+    'import { writePackageDistInventory } from "./src/infra/package-dist-inventory.ts"; await writePackageDistInventory(process.cwd());'
+}
+
 extract_package_version_from_tgz() {
   tar -xOf "$1" package/package.json | python3 -c 'import json, sys; print(json.load(sys.stdin)["version"])'
 }
@@ -531,6 +536,7 @@ pack_main_tgz() {
   fi
   say "Pack current main tgz"
   ensure_current_build
+  write_package_dist_inventory
   short_head="$(git rev-parse --short HEAD)"
   pkg="$(
     npm pack --ignore-scripts --json --pack-destination "$MAIN_TGZ_DIR" \
@@ -693,7 +699,9 @@ EOF
 }
 
 verify_bad_plugin_diagnostic() {
-  guest_exec grep -F "failed to load setup entry" /tmp/openclaw-parallels-linux-gateway.log
+  guest_bash_script <<'EOF'
+grep -F "failed to load setup entry" /tmp/openclaw-parallels-linux-gateway.log
+EOF
 }
 
 start_gateway_background() {
