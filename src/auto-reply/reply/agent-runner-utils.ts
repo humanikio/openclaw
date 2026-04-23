@@ -23,6 +23,7 @@ import {
   resolveRunAuthProfile,
 } from "./agent-runner-auth-profile.js";
 export { resolveProviderScopedAuthProfile, resolveRunAuthProfile };
+import { INTERNAL_MESSAGE_CHANNEL } from "../../utils/message-channel-constants.js";
 import { resolveOriginMessageProvider, resolveOriginMessageTo } from "./origin-routing.js";
 import type { FollowupRun } from "./queue.js";
 
@@ -224,14 +225,21 @@ export function buildEmbeddedContextFromTemplate(params: {
   hasRepliedRef: { value: boolean } | undefined;
 }) {
   const config = params.run.config;
+  const messageProvider = resolveOriginMessageProvider({
+    originatingChannel: params.sessionCtx.OriginatingChannel,
+    provider: params.sessionCtx.Provider,
+  });
   return {
     sessionId: params.run.sessionId,
     sessionKey: params.run.sessionKey,
     agentId: params.run.agentId,
-    messageProvider: resolveOriginMessageProvider({
-      originatingChannel: params.sessionCtx.OriginatingChannel,
-      provider: params.sessionCtx.Provider,
-    }),
+    messageProvider,
+    // Disable the message tool when the run has no real deliverable channel
+    // (webchat/internal-only). The agent cannot push outbound messages to webchat
+    // via the message tool — webchat responses flow through the chat.send return
+    // stream. Without this, the agent wastes retries attempting message { channel:
+    // "webchat" } which always fails.
+    disableMessageTool: messageProvider === INTERNAL_MESSAGE_CHANNEL,
     agentAccountId: params.sessionCtx.AccountId,
     messageTo: resolveOriginMessageTo({
       originatingTo: params.sessionCtx.OriginatingTo,

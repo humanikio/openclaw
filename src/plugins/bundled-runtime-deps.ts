@@ -68,7 +68,15 @@ function isSourceCheckoutBundledPluginRoot(pluginRoot: string): boolean {
   if (path.basename(extensionsDir) !== "extensions") {
     return false;
   }
-  return isSourceCheckoutRoot(path.dirname(extensionsDir));
+  const extensionsParent = path.dirname(extensionsDir);
+  // Direct source path: <checkout>/extensions/<plugin>
+  if (isSourceCheckoutRoot(extensionsParent)) {
+    return true;
+  }
+  // Build-output paths inside a source checkout: <checkout>/dist/extensions/<plugin>
+  // or <checkout>/dist-runtime/extensions/<plugin>. pnpm's hoisted node_modules at
+  // the checkout root resolves all deps — no separate install needed.
+  return isSourceCheckoutRoot(path.dirname(extensionsParent));
 }
 
 function createNestedNpmInstallEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
