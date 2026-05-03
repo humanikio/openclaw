@@ -25,6 +25,7 @@ import {
 import { CronService } from "../cron/service.js";
 import { assertSafeCronSessionTargetId } from "../cron/session-target.js";
 import { resolveCronStorePath } from "../cron/store.js";
+import type { CronJob } from "../cron/types.js";
 import { normalizeHttpWebhookUrl } from "../cron/webhook-url.js";
 import { formatErrorMessage } from "../infra/errors.js";
 import { runHeartbeatOnce } from "../infra/heartbeat-runner.js";
@@ -48,6 +49,49 @@ export type GatewayCronState = {
 };
 
 const CRON_WEBHOOK_TIMEOUT_MS = 10_000;
+
+// Synthcore-private fork: cross-VM cron slot lease.
+// When HOS_INTERNAL_TOKEN + HOS_SERVER_PORT are set (i.e. the gateway is
+// running as a subprocess of hos-openClaw), wire `beforeFireSlot` to call
+// the parent's /internal/cron/lease/claim endpoint. The parent runs a
+// Firestore transaction on cronJobs/{nexusCronId} to dedupe slot fires
+// across duplicate VMs. See openclaw/FORK.md.
+const SLOT_LEASE_TIMEOUT_MS = 5_000;
+function buildHosSlotLeaseHook():
+  | ((params: { job: CronJob; slotMs: number }) => Promise<{ proceed: boolean; reason?: string }>)
+  | undefined {
+  const token = process.env.HOS_INTERNAL_TOKEN;
+  const port = process.env.HOS_SERVER_PORT;
+  if (!token || !port) {
+    return undefined;
+  }
+  const url = `http://localhost:${port}/internal/tools/cron/lease/claim`;
+  return async ({ job, slotMs }) => {
+    const abortController = new AbortController();
+    const timeout = setTimeout(() => abortController.abort(), SLOT_LEASE_TIMEOUT_MS);
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ jobId: job.id, jobName: job.name, slotMs }),
+        signal: abortController.signal,
+      });
+      if (!res.ok) {
+        throw new Error(`lease endpoint returned ${res.status}`);
+      }
+      const data = (await res.json()) as { proceed?: boolean; reason?: string };
+      return {
+        proceed: data.proceed === true,
+        reason: typeof data.reason === "string" ? data.reason : undefined,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+}
 
 function redactWebhookUrl(url: string): string {
   try {
@@ -414,6 +458,7 @@ export function buildGatewayCronService(params: {
       });
     },
     log: getChildLogger({ module: "cron", storePath }),
+    beforeFireSlot: buildHosSlotLeaseHook(),
     onEvent: (evt) => {
       params.broadcast("cron", evt, { dropIfSlow: true });
       if (evt.action === "finished") {

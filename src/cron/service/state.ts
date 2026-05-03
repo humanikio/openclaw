@@ -111,6 +111,31 @@ export type CronServiceDeps = {
     mode?: "announce" | "webhook";
     accountId?: string;
   }) => Promise<void>;
+  /**
+   * Optional cross-VM slot lease check called before firing a job (both for
+   * timer-driven fires and startup catch-up).
+   *
+   * When multiple VMs run concurrently for the same office (e.g. a duplicate
+   * spawn during cold boot), each VM's `runMissedJobs` and `runDueJob` paths
+   * fire the same recurring crons independently — there is no in-process
+   * coordination point that spans VMs. This hook lets the caller coordinate
+   * via an external store (Firestore, Redis, etc.) keyed on `slotMs` so only
+   * one VM actually executes a given slot.
+   *
+   * Returning `{ proceed: false }` causes the engine to record the run as
+   * `status: 'skipped'` and advance `nextRunAtMs` normally — equivalent to
+   * "another instance handled this slot."
+   *
+   * Errors thrown from this hook fail open: the engine logs and proceeds with
+   * the fire. We never block a cron from running because the lease service is
+   * unreachable.
+   *
+   * Synthcore-private fork addition. See openclaw/FORK.md.
+   */
+  beforeFireSlot?: (params: {
+    job: CronJob;
+    slotMs: number;
+  }) => Promise<{ proceed: boolean; reason?: string }>;
   onEvent?: (evt: CronEvent) => void;
 };
 

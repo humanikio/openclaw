@@ -11,6 +11,7 @@ import {
 import { clearCronJobActive, markCronJobActive } from "../active-jobs.js";
 import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { createCronExecutionId } from "../run-id.js";
+import { computeJobSlotMs } from "../schedule.js";
 import { sweepCronRunSessions } from "../session-reaper.js";
 import type {
   CronDeliveryStatus,
@@ -747,6 +748,37 @@ export async function onTimer(state: CronServiceState) {
       const jobTimeoutMs = resolveCronJobTimeoutMs(job);
       const taskRunId = tryCreateCronTaskRun({ state, job, startedAt });
 
+      // Cross-VM slot lease check (Synthcore fork). When two VMs come up for
+      // the same office, both timers tick the same recurring slot at the same
+      // time. The lease lets only one of them actually fire. If the hook is
+      // not configured, behavior is unchanged.
+      const slotMs = computeJobSlotMs(job.schedule, startedAt);
+      if (slotMs !== undefined && state.deps.beforeFireSlot) {
+        try {
+          const claim = await state.deps.beforeFireSlot({ job, slotMs });
+          if (!claim.proceed) {
+            state.deps.log.info(
+              { jobId: id, jobName: job.name, slotMs, reason: claim.reason },
+              "cron: slot already claimed by another instance, skipping",
+            );
+            return {
+              jobId: id,
+              taskRunId,
+              status: "skipped",
+              error: claim.reason ?? "slot already claimed by another instance",
+              startedAt,
+              endedAt: state.deps.nowMs(),
+            };
+          }
+        } catch (err) {
+          // Fail open — never block a fire because the lease service is unreachable.
+          state.deps.log.warn(
+            { jobId: id, slotMs, err: String(err) },
+            "cron: slot lease check failed, proceeding with fire",
+          );
+        }
+      }
+
       try {
         const result = await executeJobCoreWithTimeout(state, job);
         return {
@@ -1050,6 +1082,39 @@ async function runStartupCatchupCandidate(
     startedAt,
   });
   emit(state, { jobId: candidate.job.id, action: "started", runAtMs: startedAt });
+
+  // Cross-VM slot lease check (Synthcore fork). The startup catch-up is the
+  // primary duplicate-fire vector when two VMs cold-boot for the same office:
+  // each VM's runMissedJobs sees the same overdue recurring crons and fires
+  // them independently. The lease ensures only one VM actually executes a
+  // given slot. If the hook is not configured, behavior is unchanged.
+  const slotMs = computeJobSlotMs(candidate.job.schedule, startedAt);
+  if (slotMs !== undefined && state.deps.beforeFireSlot) {
+    try {
+      const claim = await state.deps.beforeFireSlot({ job: candidate.job, slotMs });
+      if (!claim.proceed) {
+        state.deps.log.info(
+          { jobId: candidate.job.id, jobName: candidate.job.name, slotMs, reason: claim.reason },
+          "cron: startup catch-up slot already claimed by another instance, skipping",
+        );
+        return {
+          jobId: candidate.jobId,
+          taskRunId,
+          status: "skipped",
+          error: claim.reason ?? "slot already claimed by another instance",
+          startedAt,
+          endedAt: state.deps.nowMs(),
+        };
+      }
+    } catch (err) {
+      // Fail open — never block startup catch-up because the lease service is unreachable.
+      state.deps.log.warn(
+        { jobId: candidate.job.id, slotMs, err: String(err) },
+        "cron: startup catch-up slot lease check failed, proceeding with fire",
+      );
+    }
+  }
+
   try {
     const result = await executeJobCoreWithTimeout(state, candidate.job);
     return {

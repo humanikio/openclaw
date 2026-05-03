@@ -139,6 +139,62 @@ export function computeNextRunAtMs(schedule: CronSchedule, nowMs: number): numbe
   return nextMs;
 }
 
+/**
+ * Compute a deterministic slot identifier for the schedule "instance" being
+ * fired at `nowMs`. Two VMs evaluating this for the same `schedule` and any
+ * `nowMs` inside the same interval get the same slot value, which lets a
+ * cross-VM lease key on `slotMs` to dedupe duplicate fires.
+ *
+ *   at:    slot = atMs        (one-shot — single slot, ever)
+ *   every: slot = anchor + floor((nowMs - anchor) / everyMs) * everyMs
+ *           — the bucket containing nowMs (NOT the next bucket; we want the
+ *             slot we are CURRENTLY firing for, not the one we are aiming at
+ *             next).
+ *   cron:  slot = computePreviousRunAtMs(schedule, nowMs)
+ *           — the most-recently-passed cron expression match (the slot we
+ *             are catching up on / firing for now).
+ *
+ * Returns undefined for invalid schedules. Callers should fall through to
+ * normal fire behavior when undefined is returned (slot leasing is opt-in
+ * and best-effort; we never block a fire on a schedule we can't slot).
+ *
+ * Synthcore-private fork addition. See FORK.md.
+ */
+export function computeJobSlotMs(schedule: CronSchedule, nowMs: number): number | undefined {
+  if (schedule.kind === "at") {
+    const sched = schedule as { at?: string; atMs?: number | string };
+    const atMs =
+      typeof sched.atMs === "number" && Number.isFinite(sched.atMs) && sched.atMs > 0
+        ? sched.atMs
+        : typeof sched.atMs === "string"
+          ? parseAbsoluteTimeMs(sched.atMs)
+          : typeof sched.at === "string"
+            ? parseAbsoluteTimeMs(sched.at)
+            : null;
+    return atMs ?? undefined;
+  }
+
+  if (schedule.kind === "every") {
+    const everyMsRaw = coerceFiniteScheduleNumber(schedule.everyMs);
+    if (everyMsRaw === undefined) {
+      return undefined;
+    }
+    const everyMs = Math.max(1, Math.floor(everyMsRaw));
+    const anchorRaw = coerceFiniteScheduleNumber(schedule.anchorMs);
+    const anchor = Math.max(0, Math.floor(anchorRaw ?? 0));
+    if (nowMs < anchor) {
+      // Before the anchor's first slot — use the anchor itself as the slot id
+      // so a fire at this point doesn't collide with any future bucketed slot.
+      return anchor;
+    }
+    const elapsed = nowMs - anchor;
+    return anchor + Math.floor(elapsed / everyMs) * everyMs;
+  }
+
+  // cron — the most recently passed slot is the one we're firing for.
+  return computePreviousRunAtMs(schedule, nowMs);
+}
+
 export function computePreviousRunAtMs(schedule: CronSchedule, nowMs: number): number | undefined {
   if (schedule.kind !== "cron") {
     return undefined;
